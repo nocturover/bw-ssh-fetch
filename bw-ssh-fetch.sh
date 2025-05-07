@@ -9,7 +9,6 @@ SEARCH_TERM="$1"
 if ! command -v bw &>/dev/null; then
   echo "❌ Bitwarden CLI (bw) is not installed."
   echo "🔍 Download: https://bitwarden.com/download/?app=cli&platform=linux"
-  echo "📅 Or GitHub Releases: https://github.com/bitwarden/cli/releases"
   echo "🚧 Install via Snap (if available): sudo snap install bw"
   exit 1
 fi
@@ -27,29 +26,41 @@ if ! command -v jq &>/dev/null; then
   exit 1
 fi
 
-# ✅ 3. Check BW_SESSION
-if [ -z "$BW_SESSION" ]; then
-  echo "🔐 Bitwarden session not found."
-  echo "🔑 Login first: bw login"
-  echo "📆 Then unlock: export BW_SESSION=$(bw unlock --raw)"
+# ✅ 3. Check Bitwarden status and unlock session if needed
+AUTH_STATUS=$(bw status 2>/dev/null | jq -r '.status')
+
+if [ "$AUTH_STATUS" == "unauthenticated" ]; then
+  echo "🔑 Bitwarden 로그인이 필요합니다. 로그인 절차를 시작합니다..."
+  bw login || {
+    echo "❌ 로그인 실패"
+    exit 1
+  }
+  echo "🔓 로그인 후 vault unlock 중... 마스터 비밀번호를 입력하세요."
+  export BW_SESSION=$(bw unlock --raw)
+elif [ "$AUTH_STATUS" == "locked" ]; then
+  echo "🔓 Bitwarden vault가 잠겨 있습니다. 마스터 비밀번호를 입력하세요."
+  export BW_SESSION=$(bw unlock --raw)
+elif [ "$AUTH_STATUS" == "unlocked" ]; then
+  export BW_SESSION=$(bw unlock --raw)
+else
+  echo "❌ Bitwarden 상태 확인 실패. CLI 버전 문제일 수 있습니다."
   exit 1
 fi
 
-# ✅ 4. Search for items
+# ✅ 4. Sync vault
+echo "🔄 Bitwarden vault를 동기화합니다..."
+bw sync --session "$BW_SESSION" >/dev/null || {
+  echo "❌ sync 실패"
+  exit 1
+}
+
+# ✅ 5. Search for items
 echo "🔍 Searching items with keyword '$SEARCH_TERM'..."
-ITEMS_JSON=$(bw list items --search "$SEARCH_TERM" 2>/dev/null)
-
-# Handle not logged in
-if [[ -z "$ITEMS_JSON" || "$ITEMS_JSON" == *"You are not logged in"* ]]; then
-  echo "❌ You are not logged in to Bitwarden or your session has expired."
-  echo "🔑 Run: bw login"
-  echo "📆 Then: export BW_SESSION=$(bw unlock --raw)"
-  exit 1
-fi
+ITEMS_JSON=$(bw list items --search "$SEARCH_TERM" --session "$BW_SESSION" 2>/dev/null)
 
 # Validate JSON
 if ! echo "$ITEMS_JSON" | jq empty &>/dev/null; then
-  echo "❌ Invalid JSON received from Bitwarden."
+  echo "❌ Invalid JSON received from Bitwarden or session expired."
   exit 1
 fi
 
@@ -59,7 +70,7 @@ if [ "$ITEM_COUNT" -eq 0 ]; then
   exit 1
 fi
 
-# ✅ 5. Print results
+# ✅ 6. Print results
 echo ""
 echo "🔎 Search results:"
 echo "$ITEMS_JSON" | jq -r 'to_entries[] | "\(.key)) \(.value.name) [ID: \(.value.id)]"' | nl -v 0
@@ -77,13 +88,13 @@ fi
 
 OUTFILE="$SELECTED_NAME"
 
-# ✅ 6. Fetch and save SSH key
+# ✅ 7. Fetch and save SSH key
 echo "📅 Fetching SSH private key for '$SELECTED_NAME'..."
 mkdir -p ~/.ssh
-bw get item "$SELECTED_ID" | jq -r '.sshKey.privateKey' | sed 's/\\n/\n/g' > "$HOME/.ssh/$OUTFILE"
+bw get item "$SELECTED_ID" --session "$BW_SESSION" | jq -r '.sshKey.privateKey' | sed 's/\\n/\n/g' > "$HOME/.ssh/$OUTFILE"
 chmod 400 "$HOME/.ssh/$OUTFILE"
 
-# ✅ 7. Done
+# ✅ 8. Done
 echo ""
 echo "✅ SSH private key saved to: ~/.ssh/$OUTFILE"
 echo "📖 Connect example:"
